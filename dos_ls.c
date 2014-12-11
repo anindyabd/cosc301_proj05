@@ -128,7 +128,7 @@ void follow_dir(uint16_t cluster, int indent,
 
         int numDirEntries = (bpb->bpbBytesPerSec * bpb->bpbSecPerClust) / sizeof(struct direntry);
         int i = 0;
-	for ( ; i < numDirEntries; i++)
+	for ( ; i < numDirEntries; i++)    
 	{
             
             uint16_t followclust = print_dirent(dirent, indent);
