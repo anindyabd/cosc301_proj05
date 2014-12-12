@@ -236,15 +236,41 @@ int count_size_in_clusters(struct direntry *dirent, uint8_t *image_buf, struct b
     list_append(cluster, cluster_list);
     
     if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            printf("Bad cluster: cluster number %d \n", cluster);
+        printf("Bad cluster: cluster number %d \n", cluster);
     }
     
-    while (!is_end_of_file(cluster) && cluster != (FAT12_MASK & CLUST_FREE)) {   
+    while (is_valid_cluster(cluster, bpb) && cluster != (FAT12_MASK & CLUST_FREE)) {   
         
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
             //printf("Bad cluster: cluster number %d \n", cluster);
         }
-      
+
+        byte_count += cluster_size;
+
+        cluster = get_fat_entry(cluster, image_buf, bpb);
+        list_append(cluster, cluster_list);
+    }
+
+    return byte_count;
+}
+
+
+uint32_t calculate_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb, Node **cluster_list)
+{
+    uint16_t cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
+
+    uint32_t byte_count = 0;
+    list_append(cluster, cluster_list);
+    
+    if (cluster == (FAT12_MASK & CLUST_BAD)) {
+        printf("Bad cluster: cluster number %d \n", cluster);
+    }
+    
+    while (is_valid_cluster(cluster, bpb) && cluster != (FAT12_MASK & CLUST_FREE)) {   
+        
+        if (cluster == (FAT12_MASK & CLUST_BAD)) {
+            //printf("Bad cluster: cluster number %d \n", cluster);
+        }
 
         byte_count += cluster_size;
 
@@ -313,34 +339,6 @@ int follow_dir(uint16_t cluster, int indent,
     return problem_found;
 }
 
-uint16_t find_start_clust(Node *orphan_list, uint8_t *image_buf, struct bpb33 *bpb) {
-
-    int list_size = 0;
-    Node *curr = orphan_list;
-    while (curr != NULL) {
-        list_size++;
-        curr = curr->next;
-    }
-    Node *newcurr = orphan_list;
-    int chaincount = 0;
-    uint16_t start_clust = newcurr->cluster;
-    while (newcurr != NULL) {
-        uint16_t cluster = newcurr->cluster;
-        chaincount = 0;    
-        while (!is_end_of_file(cluster)) {
-            chaincount++;
-            cluster = get_fat_entry(cluster, image_buf, bpb);
-        }
-        newcurr = newcurr->next;
-        if (chaincount == list_size - 1) {
-            start_clust = cluster;
-        }
-    }
-    
-    return start_clust;
-
-}
-
 
 void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
 {
@@ -360,7 +358,7 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
         if (check_and_fix(dirent, buffer, image_buf, bpb, &list)) {
             problem_found = 1;
         }
-
+        list_append(followclust, &list);
         if (is_valid_cluster(followclust, bpb)) {
             list_append(followclust, &list);
             if (follow_dir(followclust, 1, image_buf, bpb, &list)) {
@@ -382,10 +380,13 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
             orphan_found = 1;
         }
     } 
+    
     int orphan_count = 0;
+    
+    uint16_t clust = (FAT12_MASK & CLUST_FIRST);
+    
     while (orphan_found) {
-        orphan_count++; 
-        uint16_t clust = (FAT12_MASK & CLUST_FIRST);
+        //orphan_count++; 
         orphan_found = 0;
         for ( ; clust  < 2880; clust++) {
             if (!find_match(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
@@ -394,27 +395,29 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
                 break;
             }
         } 
-        cluster = 0;
-        dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
-        //int curr_count = 1;
-        char filename[12];
-        strcat(filename, "found");
-        char str[15];
-        sprintf(str, "%d", orphan_count);
-        strcat(filename, str);
-        strcat(filename, ".dat");
-
         if (orphan_found) {
-            //int size_in_clusters = count_size_in_clusters(dirent, image_buf, bpb, &list);
+            orphan_count++;
+            cluster = 0;
+            dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
+            char filename[13];
+            memset(filename, '\0', 13);
+            strcat(filename, "found");
+            char str[3];
+            memset(str, '\0', 3);
+            int orphan_count_copy = orphan_count;
+            sprintf(str, "%d", orphan_count_copy);
+            strcat(filename, str);
+            strcat(filename, ".dat");
+            int size_in_clusters = calculate_size(clust, image_buf, bpb, &list);
             list_append(clust, &list);
-            create_dirent(dirent, filename, clust, 512, image_buf, bpb);
+            create_dirent(dirent, filename, clust, size_in_clusters, image_buf, bpb);
             problem_found = 1;
         }
          
     }
     
     if (problem_found) {
-        traverse_root(image_buf, bpb); // do it all again to ensure it's consistent...
+         // do it all again to ensure it's consistent...
         printf("All issues were fixed, system is now consistent. \n");
     }
     else {
