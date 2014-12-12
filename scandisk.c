@@ -244,9 +244,7 @@ int count_size_in_clusters(struct direntry *dirent, uint8_t *image_buf, struct b
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
             printf("Bad cluster: cluster number %d \n", cluster);
         }
-        /*if (cluster == (FAT12_MASK & CLUST_FREE)) {
-            printf("Free cluster in chain: cluster number %d \n", cluster);
-        }*/
+      
 
         byte_count += cluster_size;
 
@@ -315,6 +313,34 @@ int follow_dir(uint16_t cluster, int indent,
     return problem_found;
 }
 
+uint16_t find_start_clust(Node *orphan_list, uint8_t *image_buf, struct bpb33 *bpb) {
+
+    int list_size = 0;
+    Node *curr = orphan_list;
+    while (curr != NULL) {
+        list_size++;
+        curr = curr->next;
+    }
+    Node *newcurr = orphan_list;
+    int chaincount = 0;
+    uint16_t start_clust = newcurr->cluster;
+    while (newcurr != NULL) {
+        uint16_t cluster = newcurr->cluster;
+        chaincount = 0;    
+        while (!is_end_of_file(cluster)) {
+            chaincount++;
+            cluster = get_fat_entry(cluster, image_buf, bpb);
+        }
+        newcurr = newcurr->next;
+        if (chaincount == list_size - 1) {
+            start_clust = cluster;
+        }
+    }
+    
+    return start_clust;
+
+}
+
 
 void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
 {
@@ -346,22 +372,42 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     }
     
     int orphan_found = 0;
-    Node* orphan_list = NULL;
-    uint16_t clust = (FAT12_MASK & CLUST_FIRST);
     
-    for ( ; clust  < 2880; clust++) {
-        if (!find_match(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
-            printf("Orphan cluster found; cluster number %d \n", clust);
+    uint16_t check_clust = (FAT12_MASK & CLUST_FIRST);
+    
+    for ( ; check_clust < 2880; check_clust++) {
+        if (!find_match(check_clust, list) && (get_fat_entry(check_clust, image_buf, bpb) != CLUST_FREE))  {
+            printf("Orphan cluster found; cluster number %d \n", check_clust);
             problem_found = 1;
             orphan_found = 1;
         }
     } 
-    cluster = 0;
-    dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
     
-    if (orphan_found) {
-        create_dirent(dirent, "found1.dat", clust, 512, image_buf, bpb);
-    }   
+    while (orphan_found) { 
+        uint16_t clust = (FAT12_MASK & CLUST_FIRST);
+        orphan_found = 0;
+        for ( ; clust  < 2880; clust++) {
+            if (!find_match(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
+                printf("Orphan cluster found; cluster number %d \n", clust);
+                problem_found = 1;
+                orphan_found = 1;
+                break;
+            }
+        } 
+        printf("this loop \n");
+        cluster = 0;
+        dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
+        //int curr_count = 1;
+        
+        if (orphan_found) {
+            //int size_in_clusters = count_size_in_clusters(dirent, image_buf, bpb, &list);
+            list_append(clust, &list);
+            create_dirent(dirent, "found1.dat", clust, 512, image_buf, bpb);
+            problem_found = 1;
+        }
+        //traverse_root(image_buf, bpb);
+    }
+    
     if (problem_found) {
         printf("All issues were fixed, system is now consistent. \n");
     }
