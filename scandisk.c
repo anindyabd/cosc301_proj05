@@ -242,7 +242,7 @@ int count_size_in_clusters(struct direntry *dirent, uint8_t *image_buf, struct b
     while (!is_end_of_file(cluster) && cluster != (FAT12_MASK & CLUST_FREE)) {   
         
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            printf("Bad cluster: cluster number %d \n", cluster);
+            //printf("Bad cluster: cluster number %d \n", cluster);
         }
       
 
@@ -382,33 +382,39 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
             orphan_found = 1;
         }
     } 
-    
-    while (orphan_found) { 
+    int orphan_count = 0;
+    while (orphan_found) {
+        orphan_count++; 
         uint16_t clust = (FAT12_MASK & CLUST_FIRST);
         orphan_found = 0;
         for ( ; clust  < 2880; clust++) {
             if (!find_match(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
-                printf("Orphan cluster found; cluster number %d \n", clust);
                 problem_found = 1;
                 orphan_found = 1;
                 break;
             }
         } 
-        printf("this loop \n");
         cluster = 0;
         dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
         //int curr_count = 1;
-        
+        char filename[12];
+        strcat(filename, "found");
+        char str[15];
+        sprintf(str, "%d", orphan_count);
+        strcat(filename, str);
+        strcat(filename, ".dat");
+
         if (orphan_found) {
             //int size_in_clusters = count_size_in_clusters(dirent, image_buf, bpb, &list);
             list_append(clust, &list);
-            create_dirent(dirent, "found1.dat", clust, 512, image_buf, bpb);
+            create_dirent(dirent, filename, clust, 512, image_buf, bpb);
             problem_found = 1;
         }
-        //traverse_root(image_buf, bpb);
+         
     }
     
     if (problem_found) {
+        traverse_root(image_buf, bpb); // do it all again to ensure it's consistent...
         printf("All issues were fixed, system is now consistent. \n");
     }
     else {
