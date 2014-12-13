@@ -15,14 +15,52 @@
 #include "fat.h"
 #include "dos.h"
 
+/* list struct and functions. Used to keep track of visited clusters.*/
 typedef struct node {
     uint16_t cluster;
     struct node *next;
 } Node;
 
-void list_clear(Node *list);
-void list_append(uint16_t cluster, Node **head);
-int find_match(uint16_t cluster, Node *head);
+void list_clear(Node *list) {
+    while (list != NULL) {
+        Node *tmp = list;
+        list = list->next;
+        free(tmp);
+    }
+}
+
+
+int find_match(uint16_t cluster, Node *head) {
+    int match_found = 0;
+    Node *curr = head;
+    while (curr != NULL) {
+        if (cluster == curr->cluster) {
+            match_found = 1;
+            break;
+        }
+        curr = curr->next;
+    }
+    return match_found;
+}
+
+void list_append(uint16_t cluster, Node **head) {
+    if (find_match(cluster, *head)) { // add smartly, don't add if it's already there.
+        return;
+    }
+    Node *newnode = malloc(sizeof(Node));
+    newnode->cluster = cluster;
+    newnode->next = NULL;
+    Node *curr = *head;
+    if (curr == NULL) {
+        *head = newnode;
+        return;
+    }
+    while (curr->next != NULL) {
+        curr = curr->next;
+    }
+    curr->next = newnode;
+    newnode->next = NULL;
+}
 
 
 uint16_t get_dirent(struct direntry *dirent, char *buffer)
@@ -214,11 +252,11 @@ void fix_chain(struct direntry *dirent, uint8_t *image_buf, struct bpb33 *bpb, i
         prev_cluster = cluster;
         cluster = get_fat_entry(cluster, image_buf, bpb);
     }
-
-    set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
-
+    if (byte_count != 0) {
+        set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+    }
     // marking the other clusters pointed to by the FAT chain as free
-    while (is_valid_cluster(cluster, bpb)) {
+    while (!is_end_of_file(cluster)) {
         
         uint16_t oldcluster = cluster;
         cluster = get_fat_entry(cluster, image_buf, bpb);
@@ -234,20 +272,34 @@ int count_size_in_clusters(struct direntry *dirent, uint8_t *image_buf, struct b
 
     int byte_count = 0;
     list_append(cluster, cluster_list);
-    
-    if (cluster == (FAT12_MASK & CLUST_BAD)) {
-        printf("Bad cluster: cluster number %d \n", cluster);
+    uint16_t prev_cluster = cluster;
+    if (is_end_of_file(cluster)) {
+        byte_count = 512;
     }
-    
-    while (is_valid_cluster(cluster, bpb) && cluster != (FAT12_MASK & CLUST_FREE)) {   
-        
+    while (!is_end_of_file(cluster) && cluster < 2849) {   
+
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            //printf("Bad cluster: cluster number %d \n", cluster);
+            printf("Bad cluster: cluster number %d \n", cluster);
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;
+        }
+
+        if (cluster == (FAT12_MASK & CLUST_FREE)) {
+            //printf("Free cluster in chain: cluster number %d \n", cluster); 
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;   
         }
 
         byte_count += cluster_size;
-
+        prev_cluster = cluster;
         cluster = get_fat_entry(cluster, image_buf, bpb);
+        
+        if (prev_cluster == cluster) {
+            printf("Cluster refers to itself! Setting it as end of file. \n");
+            set_fat_entry(prev_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+            break;   
+        }
+
         list_append(cluster, cluster_list);
     }
 
@@ -262,14 +314,10 @@ uint32_t calculate_size(uint16_t cluster, uint8_t *image_buf, struct bpb33 *bpb,
     uint32_t byte_count = 0;
     list_append(cluster, cluster_list);
     
-    if (cluster == (FAT12_MASK & CLUST_BAD)) {
-        printf("Bad cluster: cluster number %d \n", cluster);
-    }
-    
-    while (is_valid_cluster(cluster, bpb) && cluster != (FAT12_MASK & CLUST_FREE)) {   
+    while (!is_end_of_file(cluster)) {   
         
         if (cluster == (FAT12_MASK & CLUST_BAD)) {
-            //printf("Bad cluster: cluster number %d \n", cluster);
+            printf("Bad cluster: cluster number %d \n", cluster);
         }
 
         byte_count += cluster_size;
@@ -287,16 +335,23 @@ int check_and_fix(struct direntry* dirent, char* filename, uint8_t *image_buf, s
     int size_in_clusters = count_size_in_clusters(dirent, image_buf, bpb, cluster_list);
     uint32_t size_in_dirent = getulong(dirent->deFileSize);
 
-    if (size_in_dirent != 0 && size_in_dirent < size_in_clusters - 512 ) { // believe the dir entry; fix the FAT
+    if (size_in_clusters != 0 && size_in_dirent < size_in_clusters - 512 ) { // believe the dir entry; fix the FAT
         printf("Inconsistent file: %s (size in dir entry: %d, size in FAT chain: %d) \n", filename, size_in_dirent, size_in_clusters);
         fix_chain(dirent, image_buf, bpb, size_in_dirent);
         problem_found = 1;
     }
 
-    else if (size_in_dirent != 0 && size_in_dirent > size_in_clusters) { // believe the FAT chain, fix the dir entry
+    else if (size_in_dirent > size_in_clusters) { // believe the FAT chain, fix the dir entry
         printf("Inconsistent file: %s (size in dir entry: %d, size in FAT chain: %d) \n", filename, size_in_dirent, size_in_clusters);
         putulong(dirent->deFileSize, size_in_clusters);
         problem_found = 1;
+    }
+
+    if (size_in_dirent == 0) {
+        if (dirent->deAttributes == ATTR_NORMAL && dirent->deName[0] != SLOT_EMPTY && dirent->deName[0] != SLOT_DELETED) {
+            printf("File with size 0 found. Deleting the entry. \n");
+            dirent->deName[0] = SLOT_DELETED;
+        }
     }
 
     return problem_found;
@@ -308,6 +363,7 @@ int follow_dir(uint16_t cluster, int indent,
     int problem_found = 0;
     while (is_valid_cluster(cluster, bpb))
     {   
+        
         list_append(cluster, cluster_list);
         struct direntry *dirent = (struct direntry*)cluster_to_addr(cluster, image_buf, bpb);
 
@@ -316,22 +372,23 @@ int follow_dir(uint16_t cluster, int indent,
 
         int i = 0;
         for ( ; i < numDirEntries; i++) {
-                
-                list_append(cluster, cluster_list);
+            list_append(cluster, cluster_list);
 
-                uint16_t followclust = get_dirent(dirent, buffer);
+            uint16_t followclust = get_dirent(dirent, buffer);
+            
+            
+            if (check_and_fix(dirent, buffer, image_buf, bpb, cluster_list)) {
+                problem_found = 1;
+            }
         
-                if (check_and_fix(dirent, buffer, image_buf, bpb, cluster_list)) {
+
+            if (followclust) {
+                if (follow_dir(followclust, indent+1, image_buf, bpb, cluster_list)) {
                     problem_found = 1;
                 }
-
-                if (followclust) {
-                    if (follow_dir(followclust, indent+1, image_buf, bpb, cluster_list)) {
-                        problem_found = 1;
-                    }
-                }
-                
-                dirent++;
+            }
+            
+            dirent++;
         }
 
         cluster = get_fat_entry(cluster, image_buf, bpb);
@@ -354,9 +411,10 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     for ( ; i < bpb->bpbRootDirEnts; i++)
     {
         uint16_t followclust = get_dirent(dirent, buffer);
-
-        if (check_and_fix(dirent, buffer, image_buf, bpb, &list)) {
-            problem_found = 1;
+        if (dirent->deAttributes == ATTR_NORMAL) {
+            if (check_and_fix(dirent, buffer, image_buf, bpb, &list)) {
+                problem_found = 1;
+            }
         }
         list_append(followclust, &list);
         if (is_valid_cluster(followclust, bpb)) {
@@ -373,7 +431,7 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     
     uint16_t check_clust = (FAT12_MASK & CLUST_FIRST);
     
-    for ( ; check_clust < 2880; check_clust++) {
+    for ( ; check_clust < 2849; check_clust++) {
         if (!find_match(check_clust, list) && (get_fat_entry(check_clust, image_buf, bpb) != CLUST_FREE))  {
             printf("Orphan cluster found; cluster number %d \n", check_clust);
             problem_found = 1;
@@ -386,9 +444,8 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     uint16_t clust = (FAT12_MASK & CLUST_FIRST);
     
     while (orphan_found) {
-        //orphan_count++; 
         orphan_found = 0;
-        for ( ; clust  < 2880; clust++) {
+        for ( ; clust  < 2849; clust++) {
             if (!find_match(clust, list) && (get_fat_entry(clust, image_buf, bpb) != CLUST_FREE))  {
                 problem_found = 1;
                 orphan_found = 1;
@@ -426,42 +483,6 @@ void traverse_root(uint8_t *image_buf, struct bpb33* bpb)
     list_clear(list);
 }
 
-void list_clear(Node *list) {
-    while (list != NULL) {
-        Node *tmp = list;
-        list = list->next;
-        free(tmp);
-    }
-}
-
-void list_append(uint16_t cluster, Node **head) {
-    Node *newnode = malloc(sizeof(Node));
-    newnode->cluster = cluster;
-    newnode->next = NULL;
-    Node *curr = *head;
-    if (curr == NULL) {
-        *head = newnode;
-        return;
-    }
-    while (curr->next != NULL) {
-        curr = curr->next;
-    }
-    curr->next = newnode;
-    newnode->next = NULL;
-}
-
-int find_match(uint16_t cluster, Node *head) {
-    int match_found = 0;
-    Node *curr = head;
-    while (curr != NULL) {
-        if (cluster == curr->cluster) {
-            match_found = 1;
-            break;
-        }
-        curr = curr->next;
-    }
-    return match_found;
-}
 
 void usage(char *progname) {
     fprintf(stderr, "usage: %s <imagename>\n", progname);
@@ -482,6 +503,7 @@ int main(int argc, char** argv) {
 
     traverse_root(image_buf, bpb);
 
+    free(bpb);
     unmmap_file(image_buf, &fd);
     return 0;
 }
